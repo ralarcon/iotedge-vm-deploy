@@ -29,19 +29,141 @@ packages:
   - moby-cli
   - libiothsm-std
   - moby-engine
+write_files:
+  - path: /tmp/docker-daemon.json
+    permissions: 0644
+    owner: root
+    content: |
+      {
+              "dns": ["1.1.1.1"],
+              "log-driver": "json-file",
+              "log-opts": { "max-size": "50m", "max-file": "5" }
+      }
+  - path: /tmp/iotedge-config.yaml
+    permissions: 0600
+    owner: root
+    content: |
+      ###############################################################################
+      #                      IoT Edge Daemon configuration
+      ###############################################################################
+      #
+      # This file configures the IoT Edge daemon. The daemon must be restarted to
+      # pick up any configuration changes.
+      #
+      # Note - this is a simplified config file used for automation. For details on 
+      # other config options, check /etc/iotedge/config.yaml.bak
+      #
+      ###############################################################################      
+      
+      # DPS X.509 provisioning configuration
+      provisioning:
+        source: "dps"
+        global_endpoint: "https://global.azure-devices-provisioning.net"
+        scope_id: "', variables('dpsScopeId'), '"
+        attestation:
+          method: "x509"
+          identity_cert: "file:///home/', variables('adminUserName') ,'/edgeCerts/iot-edge-device-identity-', variables('edgeDeviceName') , '-full-chain.cert.pem"
+          identity_pk: "file:///home/', variables('adminUserName') ,'/edgeCerts/iot-edge-device-identity-', variables('edgeDeviceName'), '.key.pem"
+        dynamic_reprovisioning: true
+      
+      ###############################################################################
+      # Certificate settings
+      ###############################################################################
+      certificates:
+        device_ca_cert: "file:///home/', variables('adminUserName') ,'/edgeCerts/iot-edge-device-', variables('edgeDeviceName'), '-CA-full-chain.cert.pem"
+        device_ca_pk: "file:///home/', variables('adminUserName') ,'/edgeCerts/iot-edge-device-', variables('edgeDeviceName'), '-CA.key.pem"
+        trusted_ca_certs: "file:///home/', variables('adminUserName') ,'/edgeCerts/azure-iot-test-only.root.ca.cert.pem"     
+
+      ###############################################################################
+      # Edge Agent module spec
+      ############################################################################### 
+      agent:
+        name: "edgeAgent"
+        type: "docker"
+        env: {}
+        config:
+          image: "mcr.microsoft.com/azureiotedge-agent:1.0"
+          auth: {}
+                
+      ###############################################################################
+      # Edge device hostname
+      ###############################################################################            
+      hostname: "iot-playground-', variables('edgeDeviceName'), '-vm"
+
+      ###############################################################################
+      # Connect settings
+      ###############################################################################
+      connect:
+        management_uri: "unix:///var/run/iotedge/mgmt.sock"
+        workload_uri: "unix:///var/run/iotedge/workload.sock"      
+
+      ###############################################################################
+      # Listen settings
+      ###############################################################################      
+      listen:
+        management_uri: "fd://iotedge.mgmt.socket"
+        workload_uri: "fd://iotedge.socket"
+
+      ###############################################################################
+      # Home Directory
+      ###############################################################################
+      homedir: "/var/lib/iotedge"            
+
+      ###############################################################################
+      # Moby Container Runtime settings
+      ###############################################################################
+      moby_runtime:
+        uri: "unix:///var/run/docker.sock"
 runcmd:
   - |
       set -x
       (
+        sudo apt-get update -y
+        sudo apt-get upgrade -y
+
+        # Install Az cli
+        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+        
+        # Install Az Copy
+        wget https://aka.ms/downloadazcopy-v10-linux
+        tar -xvf downloadazcopy-v10-linux
+        sudo rm /usr/bin/azcopy
+        sudo cp ./azcopy_linux_amd64_*/azcopy /usr/bin/
+        sudo chmod +x /usr/bin/azcopy
+        
+        # Download Certificates from Storage Account
+        azcopy copy "', variables('certsStorageSasUrl'), '" "/home/', variables('adminUserName') ,'/edgeCerts"
+
+        chown -R ', variables('adminUserName') ,':', variables('adminUserName') ,' /home/', variables('adminUserName') ,'/edgeCerts
+
         # Wait for docker daemon to start
         while [ $(ps -ef | grep -v grep | grep docker | wc -l) -le 0 ]; do 
           sleep 3
         done
 
+        #TODO: Replace with a template file and one replacement
+
         # Prevent iotedge from starting before the device connection string is set in config.yaml
         sudo ln -s /dev/null /etc/systemd/system/iotedge.service
-        apt install iotedge
-        sed -i "s#\(device_connection_string: \).*#\1\"', variables('dcs'), '\"#g" /etc/iotedge/config.yaml 
-        systemctl unmask iotedge
-        systemctl start iotedge
+        sudo apt-get update
+        sudo apt-get install iotedge
+
+        # Prepare local storage for edge device
+        sudo mkdir /etc/iotedge/storage
+        sudo chown 1000 /etc/iotedge/storage
+        sudo chmod 700 /etc/iotedge/storage
+
+        #Docker daemon config
+        sudo cp /tmp/docker-daemon.json /etc/docker/daemon.json
+
+        #Move config.yaml
+        sudo chown iotedge:iotedge /tmp/iotedge-config.yaml
+        sudo mv /etc/iotedge/config.yaml /etc/iotedge/config.yaml.bak
+        sudo mv /tmp/iotedge-config.yaml /etc/iotedge/config.yaml -f 
+
+        sudo systemctl daemon-reload
+        sudo systemctl restart docker
+
+        sudo systemctl unmask iotedge
+        sudo systemctl start iotedge
       ) &
